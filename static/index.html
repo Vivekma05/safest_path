@@ -121,6 +121,19 @@
         </div>
     </header>
 
+    <!-- Safety Warning Overlay -->
+    <div id="safety-warning-overlay" class="fixed inset-0 bg-red-600/95 z-[9999] hidden flex-col items-center justify-center p-6 text-center backdrop-blur-sm transition-all">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-24 w-24 text-white mb-6 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+        </svg>
+        <h1 class="text-4xl font-black text-white mb-4 uppercase tracking-wider">Are you fine?</h1>
+        <p class="text-red-100 text-lg mb-8">We noticed you stopped moving. Emergency protocol will activate in:</p>
+        <div id="safety-countdown" class="text-7xl font-black text-white mb-12 tabular-nums">15</div>
+        <button id="btn-i-am-fine" class="bg-white text-red-600 hover:bg-red-50 font-black text-xl py-4 px-12 rounded-full shadow-2xl active:scale-95 transition-all">
+            YES, I AM FINE
+        </button>
+    </div>
+
     <!-- Main Layout -->
     <main class="p-4 grid grid-cols-1 lg:grid-cols-12 gap-4 flex-1 overflow-y-auto">
         <!-- Sidebar -->
@@ -211,8 +224,21 @@
         const hourRange = document.getElementById('hour-range');
         const hourDisplay = document.getElementById('hour-display');
         const areaJump = document.getElementById('area-jump');
+        const daySelect = document.getElementById('day-select');
+
+        // Auto-set current day and hour from the device
+        const now = new Date();
+        const daysOfWeek = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+        daySelect.value = daysOfWeek[now.getDay()];
+        hourRange.value = now.getHours();
+        hourDisplay.innerText = `${hourRange.value.padStart(2, '0')}:00`;
 
         hourRange.oninput = () => { hourDisplay.innerText = `${hourRange.value.padStart(2, '0')}:00`; };
+
+        // Auto-request GPS location on app load
+        setTimeout(() => {
+            document.getElementById('btn-live-location').click();
+        }, 1000);
 
         // Handle Area Jump
         areaJump.onchange = (e) => {
@@ -445,6 +471,7 @@
             startLabel.innerText = "Click map to set"; startLabel.classList.remove('text-blue-600', 'font-bold'); startLabel.classList.add('italic');
             endLabel.innerText = "Click map to set"; endLabel.classList.add('italic');
             document.getElementById('route-stats').classList.add('hidden');
+            stopSafetyTracking();
         };
 
         document.getElementById('find-route-btn').onclick = async () => {
@@ -480,6 +507,9 @@
                         alert(data.message || 'No route returned. Please choose different points.');
                     }
                 }
+                // Start tracking for stoppage
+                startSafetyTracking();
+
             } catch (err) {
                 console.error('Fetch failed', err);
                 alert('Backend unreachable. Start the server and refresh.');
@@ -487,6 +517,126 @@
                 document.getElementById('loading').classList.add('hidden');
             }
         };
+        // --- Safety Tracking & Emergency Protocol ---
+        
+        let safetyWatchId = null;
+        let isSafetyTrackingActive = false;
+        let lastSafetyLocation = null;
+        let lastMovedTimestamp = Date.now();
+        let safetyWarningActive = false;
+        let emergencyTriggered = false;
+        let countdownTimer = null;
+        let countdownValue = 15;
+
+        // Dummy function for teammate to integrate Twilio & Gmail
+        window.triggerEmergencyProtocol = function(lat, lng) {
+            console.warn("CRITICAL: EMERGENCY PROTOCOL TRIGGERED at", lat, lng);
+            // TODO: TEAMMATE - Add Twilio SMS/Call API code here
+            // TODO: TEAMMATE - Add Gmail/Email API code here
+            
+            showToast("EMERGENCY ALERT SENT!", 10000);
+            emergencyTriggered = true;
+        };
+
+        function resetSafetyWarning() {
+            safetyWarningActive = false;
+            clearInterval(countdownTimer);
+            document.getElementById('safety-warning-overlay').classList.add('hidden');
+            document.getElementById('safety-warning-overlay').classList.remove('flex');
+            lastMovedTimestamp = Date.now();
+        }
+
+        document.getElementById('btn-i-am-fine').onclick = () => {
+            resetSafetyWarning();
+            showToast("Glad you are safe. Tracking resumed.");
+        };
+
+        async function triggerSafetyWarning() {
+            if (safetyWarningActive || emergencyTriggered) return;
+            safetyWarningActive = true;
+            countdownValue = 15;
+            
+            const overlay = document.getElementById('safety-warning-overlay');
+            const countdownEl = document.getElementById('safety-countdown');
+            overlay.classList.remove('hidden');
+            overlay.classList.add('flex');
+            countdownEl.innerText = countdownValue;
+
+            if (window.Capacitor && window.Capacitor.Plugins.LocalNotifications) {
+                try {
+                    await Capacitor.Plugins.LocalNotifications.requestPermissions();
+                    await Capacitor.Plugins.LocalNotifications.schedule({
+                        notifications: [{
+                            title: "Safety Check!",
+                            body: "You have stopped moving. Are you fine? Tap to confirm.",
+                            id: 911,
+                            schedule: { at: new Date(Date.now() + 1000) },
+                            actionTypeId: "",
+                            extra: null
+                        }]
+                    });
+                } catch(e) { console.error("Notification error", e); }
+            }
+
+            countdownTimer = setInterval(() => {
+                countdownValue--;
+                countdownEl.innerText = countdownValue;
+                if (countdownValue <= 0) {
+                    clearInterval(countdownTimer);
+                    overlay.classList.add('hidden');
+                    overlay.classList.remove('flex');
+                    if (!emergencyTriggered) {
+                        const loc = lastSafetyLocation || {lat: 0, lng: 0};
+                        window.triggerEmergencyProtocol(loc.lat, loc.lng);
+                    }
+                }
+            }, 1000);
+        }
+
+        function startSafetyTracking() {
+            if (isSafetyTrackingActive) return;
+            if (!navigator.geolocation) return;
+            
+            isSafetyTrackingActive = true;
+            lastMovedTimestamp = Date.now();
+            emergencyTriggered = false;
+            
+            safetyWatchId = navigator.geolocation.watchPosition(
+                (position) => {
+                    if (emergencyTriggered) return;
+                    
+                    const lat = position.coords.latitude;
+                    const lng = position.coords.longitude;
+                    const currentLocation = {lat, lng};
+                    
+                    if (!lastSafetyLocation) {
+                        lastSafetyLocation = currentLocation;
+                        lastMovedTimestamp = Date.now();
+                        return;
+                    }
+                    
+                    const distMoved = haversineMetres(lastSafetyLocation.lat, lastSafetyLocation.lng, lat, lng);
+                    const timeSinceLastMove = (Date.now() - lastMovedTimestamp) / 1000;
+                    
+                    if (distMoved > 5) {
+                        lastSafetyLocation = currentLocation;
+                        lastMovedTimestamp = Date.now();
+                    } else if (timeSinceLastMove > 30 && !safetyWarningActive) {
+                        triggerSafetyWarning();
+                    }
+                },
+                (error) => console.error("Tracking Error:", error),
+                { enableHighAccuracy: true, maximumAge: 10000, timeout: 5000 }
+            );
+        }
+
+        function stopSafetyTracking() {
+            if (safetyWatchId !== null) {
+                navigator.geolocation.clearWatch(safetyWatchId);
+            }
+            isSafetyTrackingActive = false;
+            resetSafetyWarning();
+        }
     </script>
 </body>
 </html>
